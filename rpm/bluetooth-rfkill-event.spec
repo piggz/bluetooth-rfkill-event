@@ -7,6 +7,7 @@ License: GPLv2
 Source0: %{name}-%{version}.tar.bz2
 Requires: bluez-libs
 BuildRequires: bluez-libs-devel
+BuildRequires: glib2-devel
 
 %description
 Bluetooth rfkill event daemon. Part of Intel Edison GPL/LGPL sources.
