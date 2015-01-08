@@ -47,7 +47,7 @@
 #include <bluetooth/hci_lib.h>
 
 
-enum {
+enum rfkill_switch_type {
     BT_PWR,
     BT_HCI,
 };
@@ -91,13 +91,24 @@ struct rfkill_event {
     unsigned char soft, hard;
 } __packed;
 
+struct rfkill_switch {
+    gchar *name;
+    enum rfkill_switch_type type;
+    union {
+	struct {
+	    int dev_id;
+	} hci;
+    };
+};
+
 /* HCI UART driver initialization utility; usually it takes care of FW patch download as well */
 char hciattach[PATH_MAX];
 char hciattach_options[PATH_MAX];
 char hci_uart_default_dev[PATH_MAX] = BCM_43341_UART_DEV;
 
 gboolean hci_dev_registered;
-int bt_pwr_rfkill_idx;
+char *config_file = DEFAULT_CONFIG_FILE;
+GHashTable *switch_hash = NULL; /* hash index to metadata about the switch */
 
 struct main_opts {
     /* 'fork' will keep running in background the hciattach utility; N/A if enable_hci is FALSE */
@@ -188,6 +199,13 @@ static void bt_log(int level, const char *format, ...)
             __FUNCTION__, __FILE__, __LINE__, ## args); \
         exit(EXIT_FAILURE);                             \
     } while (0)
+
+static void switch_free(gpointer data)
+{
+    struct rfkill_switch *s = data;
+    g_free(s->name);
+    g_free(s);
+}
 
 static const char *op2string(enum rfkill_operation op)
 {
@@ -576,15 +594,71 @@ void rfkill_bluetooth_unblock()
 
 }
 
+static int rfkill_switch_add(struct rfkill_event *event)
+{
+    char sysname[PATH_MAX];
+    struct rfkill_switch *s = NULL;
+    int fd_name = -1;
+    int r = -1;
+    int type;
+
+    /* get the name to check the bt chip */
+    snprintf(sysname, sizeof(sysname), "/sys/class/rfkill/rfkill%u/name",
+	     event->idx);
+
+    fd_name = open(sysname, O_RDONLY);
+    if (fd_name < 0) {
+	ERROR("Failed to open rfkill name (%s/%d)", strerror(errno), errno);
+	goto out;
+    }
+
+    /* read name */
+    memset(sysname, 0, sizeof(sysname));
+    if (read(fd_name, sysname, sizeof(sysname) - 1) < 0) {
+	ERROR("Failed to read rfkill name (%s/%d)", strerror(errno), errno);
+	goto out;
+    }
+
+    /* based on chip read its config file, if any, and define the hciattach utility used to dowload the patch */
+    if (!strncmp(BCM_RFKILL_NAME, sysname, sizeof(BCM_RFKILL_NAME))) {
+	read_config(config_file);
+	snprintf(hciattach, sizeof(hciattach), "brcm_patchram_plus");
+	type = BT_PWR;
+    } else if (g_str_has_prefix(sysname, "hci")) {
+	type = BT_HCI;
+    } else {
+	DEBUG("Skipping over unsupported rfkill switch '%s'", sysname);
+	goto out;
+    }
+
+    DEBUG("Recording rfkill switch %d into hash", event->idx);
+    s = g_new0(struct rfkill_switch, 1);
+    s->name = g_strdup(sysname);
+    s->type = type;
+    if (type == BT_HCI) {
+	s->hci.dev_id = atoi(sysname + 3);
+    }
+    g_hash_table_replace(switch_hash, GINT_TO_POINTER(event->idx), s);
+
+    r = 0;
+
+out:
+    if (fd_name >= 0)
+	close(fd_name);
+
+    return r;
+}
+
 int main(int argc, char **argv)
 {
     struct rfkill_event event;
     struct pollfd p;
     ssize_t len;
-    int fd, fd_name, n, type;
-    int hci_dev_id = -1;
-    char sysname[PATH_MAX];
-    char *config_file = DEFAULT_CONFIG_FILE;
+    int fd, n;
+    struct rfkill_switch *s = NULL;
+
+    switch_hash = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+					switch_free);
 
     opterr = 0;
     while (1) {
@@ -663,56 +737,25 @@ int main(int argc, char **argv)
               event.idx, type2string(event.type), event.type,
               op2string(event.op), event.op, event.soft, event.hard);
 
-        /* try to read rfkill interface name only if event is not a remove one, in this case call free_hci */
-        if (event.op != RFKILL_OP_DEL)
-        {
-            /* get the name to check the bt chip */
-            snprintf(sysname, sizeof(sysname), "/sys/class/rfkill/rfkill%u/name", event.idx);
+        /* Read rfkill switch metadata on addition; no need to read it
+	   repeatedly on every change. */
+        if (event.op == RFKILL_OP_ADD)
+	    if (rfkill_switch_add(&event) < 0)
+		continue;
 
-            fd_name = open(sysname, O_RDONLY);
-            if (fd_name < 0)
-            {
-                ERROR("Failed to open rfkill name (%s/%d)",
-                     strerror(errno), errno);
-                continue;
-            }
-
-            memset(sysname, 0, sizeof(sysname));
-
-            /* read name */
-            if (read(fd_name, sysname, sizeof(sysname) - 1) < 0)
-            {
-                ERROR("Failed to read rfkill name (%s/%d)",
-                      strerror(errno), errno);
-                close(fd_name);
-                continue;
-            }
-
-            close(fd_name);
-
-            /* based on chip read its config file, if any, and define the hciattach utility used to dowload the patch */
-            if (strncmp(BCM_RFKILL_NAME,sysname, sizeof(BCM_RFKILL_NAME)) == 0)
-            {
-                read_config(config_file);
-                snprintf(hciattach, sizeof(hciattach), "brcm_patchram_plus");
-                type = BT_PWR;
-            }
-            else if (g_str_has_prefix(sysname, "hci") )
-            {
-                type = BT_HCI;
-                hci_dev_id = atoi(sysname + 3);
-            }
-            else
-                continue;
-        }
+	s = g_hash_table_lookup(switch_hash, GINT_TO_POINTER(event.idx));
+	if (!s) {
+	    WARN("Unknown rfkill switch %d", event.idx);
+	    continue;
+	}
 
         switch (event.op) {
         case RFKILL_OP_CHANGE:
         case RFKILL_OP_CHANGE_ALL:
         case RFKILL_OP_ADD:
             if (event.soft == 0 && event.hard == 0)
-            {
-                if (type == BT_PWR)
+	    {
+                if (s->type == BT_PWR)
                 {
                     /* if unblock is for power interface: download patch and eventually register hci device */
                     free_hci();
@@ -721,27 +764,27 @@ int main(int argc, char **argv)
                     if (hci_dev_registered)
                         rfkill_bluetooth_unblock();
                 }
-                else if (type == BT_HCI && hci_dev_registered)
+                else if (s->type == BT_HCI && hci_dev_registered)
                 {
                     /* wait unblock on hci bluetooth interface and force device UP */
-                    up_hci(hci_dev_id);
+                    up_hci(s->hci.dev_id);
                 }
             }
-            else if (type == BT_PWR && hci_dev_registered)
+            else if (s->type == BT_PWR && hci_dev_registered)
             {
                 /* for a block event on power interface force unblock of hci device interface */
                 free_hci();
             }
 
-            /* save index of rfkill interface for bluetooth power */
-            if (event.op == RFKILL_OP_ADD && type == BT_PWR)
-                bt_pwr_rfkill_idx = event.idx;
         break;
         case RFKILL_OP_DEL:
             /* in case pwr rfkill interface is removed, unregister hci dev if it was registered */
-            if (bt_pwr_rfkill_idx == event.idx && hci_dev_registered)
+            if (s->type == BT_PWR && hci_dev_registered)
                 free_hci();
-        break;
+	    DEBUG("Removing rfkill switch %d from hash", event.idx);
+	    g_hash_table_remove(switch_hash, GINT_TO_POINTER(event.idx));
+	    break;
+
         default:
             continue;
         }
