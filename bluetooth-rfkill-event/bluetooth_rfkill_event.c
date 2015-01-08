@@ -120,6 +120,8 @@ struct main_opts {
     /* set SCO routing for audio interface */
     gboolean    set_scopcm;
     char*       scopcm;
+    /* Delay before patchram download (microseconds) */
+    guint       tosleep;
 };
 
 struct main_opts main_opts;
@@ -132,6 +134,7 @@ static const char * const supported_options[] = {
     "fw_patch",
     "uart_dev",
     "scopcm",
+    "tosleep"
 };
 
 void init_config()
@@ -145,6 +148,7 @@ void init_config()
     main_opts.dl_patch = FALSE;
     main_opts.set_bd = FALSE;
     main_opts.set_scopcm = FALSE;
+    main_opts.tosleep = 0;
 }
 
 GKeyFile *load_config(const char *file)
@@ -269,6 +273,14 @@ void parse_config(GKeyFile *config)
         main_opts.scopcm = str;
         main_opts.set_scopcm = TRUE;
     }
+
+    val = g_key_file_get_integer(config, "General", "tosleep", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        main_opts.tosleep = val;
+    }
+
 }
 
 gboolean check_bd_format(const char* bd_add)
@@ -363,6 +375,9 @@ void read_config(char* file)
     }
     if ((cur < end) && (main_opts.set_scopcm)) {
         cur += snprintf(cur, end-cur," --scopcm %s", main_opts.scopcm);
+    }
+    if ((cur < end) && (main_opts.tosleep)) {
+        cur += snprintf(cur, end-cur," --tosleep %d", main_opts.tosleep);
     }
 }
 
