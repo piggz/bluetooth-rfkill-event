@@ -38,9 +38,9 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <limits.h>
-#include <err.h>
-#include <error.h>
 #include <getopt.h>
+#include <syslog.h>
+#include <stdarg.h>
 #include <glib.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -137,6 +137,84 @@ static const char * const supported_options[] = {
     "tosleep"
 };
 
+static int log_debug = 0;
+static int log_stderr = 0;
+
+static void bt_log(int level, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static void bt_log(int level, const char *format, ...)
+{
+    static int log_open = 0;
+    va_list ap;
+
+    if (level == LOG_DEBUG && !log_debug)
+        return;
+
+    if (!log_open) {
+        openlog("bluetooth_rfkill_event",
+                (log_stderr ? LOG_PERROR : 0) | LOG_PID,
+                LOG_DAEMON);
+        log_open = 1;
+    }
+
+    va_start(ap, format);
+    vsyslog(level, format, ap);
+    va_end(ap);
+}
+
+#define DEBUG(fmt, args...) do {                        \
+        bt_log(LOG_DEBUG, "%s(%s:%d): " fmt "\n",       \
+            __FUNCTION__, __FILE__, __LINE__, ## args); \
+    } while (0)
+
+#define INFO(fmt, args...) do {                         \
+        bt_log(LOG_INFO, "%s(%s:%d): " fmt "\n",        \
+            __FUNCTION__, __FILE__, __LINE__, ## args); \
+    } while (0)
+
+#define WARN(fmt, args...) do {                         \
+        bt_log(LOG_WARNING, "%s(%s:%d): " fmt "\n",     \
+            __FUNCTION__, __FILE__, __LINE__, ## args); \
+    } while (0)
+
+#define ERROR(fmt, args...) do {                        \
+        bt_log(LOG_ERR, "%s(%s:%d): " fmt "\n",         \
+            __FUNCTION__, __FILE__, __LINE__, ## args); \
+    } while (0)
+
+#define FATAL(fmt, args...) do {                        \
+        bt_log(LOG_ERR, "%s(%s:%d): " fmt "\n",         \
+            __FUNCTION__, __FILE__, __LINE__, ## args); \
+        exit(EXIT_FAILURE);                             \
+    } while (0)
+
+static const char *op2string(enum rfkill_operation op)
+{
+    switch (op) {
+    case RFKILL_OP_ADD: return "ADD";
+    case RFKILL_OP_DEL: return "DEL";
+    case RFKILL_OP_CHANGE: return "CHANGE";
+    case RFKILL_OP_CHANGE_ALL: return "CHANGE_ALL";
+    default: return NULL;
+    }
+}
+
+static const char *type2string(enum rfkill_type type)
+{
+    switch(type) {
+    case RFKILL_TYPE_ALL: return "ALL";
+    case RFKILL_TYPE_WLAN: return "WLAN";
+    case RFKILL_TYPE_BLUETOOTH: return "BLUETOOTH";
+    case RFKILL_TYPE_UWB: return "UWB";
+    case RFKILL_TYPE_WIMAX: return "WIMAX";
+    case RFKILL_TYPE_WWAN: return "WWAN";
+    case RFKILL_TYPE_GPS: return "GPS";
+    case RFKILL_TYPE_FM: return "FM";
+    default: return NULL;
+    }
+}
+
 void init_config()
 {
     memset(&main_opts, 0, sizeof(main_opts));
@@ -162,7 +240,7 @@ GKeyFile *load_config(const char *file)
 
     if (!g_key_file_load_from_file(keyfile, file, 0, &err)) {
         if (!g_error_matches(err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-            error(1, 0, "Parsing %s failed: %s", file, err->message);
+            FATAL("Parsing %s failed: %s", file, err->message);
         g_error_free(err);
         g_key_file_free(keyfile);
         return NULL;
@@ -183,7 +261,7 @@ void check_config(GKeyFile *config)
 
     for (i = 0; keys != NULL && keys[i] != NULL; i++) {
         if (!g_str_equal(keys[i], "General"))
-            warn("Unknown group %s in main.conf", keys[i]);
+            WARN("Unknown group %s in main.conf", keys[i]);
     }
 
     g_strfreev(keys);
@@ -203,7 +281,7 @@ void check_config(GKeyFile *config)
         }
 
         if (!found)
-            warn("Unknown key %s in main.conf", keys[i]);
+            WARN("Unknown key %s in main.conf", keys[i]);
     }
 
     g_strfreev(keys);
@@ -384,28 +462,31 @@ void read_config(char* file)
 void free_hci()
 {
     char cmd[PATH_MAX];
+    int r;
 
     snprintf(cmd, sizeof(cmd), "pidof %s", hciattach);
 
-    if (!system(cmd))
-    {
+    r = system(cmd);
+    if (WIFEXITED(r) && !WEXITSTATUS(r)) {
         snprintf(cmd, sizeof(cmd), "killall %s", hciattach);
-        system(cmd);
-        printf("killing %s\n", hciattach);
-        fflush(stdout);
+        r = system(cmd);
+        INFO("killing %s %s", hciattach,
+             (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
+    } else {
+        INFO("No %s process to be found", hciattach);
     }
 }
 
 void attach_hci()
 {
     char hci_execute[PATH_MAX];
+    int r;
 
     snprintf(hci_execute, sizeof(hci_execute), "%s %s %s", hciattach, hciattach_options, main_opts.uart_dev);
 
-    printf("execute %s\n", hci_execute);
-    fflush(stdout);
-
-    system(hci_execute);
+    r = system(hci_execute);
+    INFO("executing %s %s", hci_execute,
+         (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
 
     /* remember if hci device has been registered (in case conf file is changed) */
     hci_dev_registered = main_opts.enable_hci;
@@ -420,7 +501,8 @@ void up_hci(int hci_idx)
 
     if (sk < 0)
     {
-        perror("Fail to create bluetooth hci socket");
+        ERROR("Failed to create bluetooth hci socket (%s/%d)",
+              strerror(errno), errno);
         return;
     }
 
@@ -432,7 +514,8 @@ void up_hci(int hci_idx)
     {
         if (ioctl(sk, HCIGETDEVINFO, (void *) &hci_info) < 0)
         {
-            perror("Failed to get HCI device information");
+            ERROR("Failed to get HCI device information (%s/%d)",
+                  strerror(errno), errno);
             /* sleep 100ms */
             usleep(100*1000);
             continue;
@@ -449,7 +532,8 @@ void up_hci(int hci_idx)
                     if (errno == EALREADY)
                         break;
 
-                    perror("Fail to set hci device UP");
+                    ERROR("Failed to set hci device UP (%s/%d)",
+                          strerror(errno), errno);
                 }
             }
             break;
@@ -475,7 +559,8 @@ void rfkill_bluetooth_unblock()
     fd = open("/dev/rfkill", O_RDWR | O_CLOEXEC);
     if (fd < 0)
     {
-        perror("fail to open rfkill interface");
+        ERROR("fail to open rfkill interface (%s/%d)",
+              strerror(errno), errno);
         return;
     }
     memset(&event, 0, sizeof(event));
@@ -484,7 +569,8 @@ void rfkill_bluetooth_unblock()
     event.soft = 0;
     if (write(fd, &event, sizeof(event)) < 0)
     {
-        perror("fail to unblock rfkill bluetooth");
+        ERROR("fail to unblock rfkill bluetooth (%s/%d)",
+              strerror(errno), errno);
     }
     close(fd);
 
@@ -493,7 +579,6 @@ void rfkill_bluetooth_unblock()
 int main(int argc, char **argv)
 {
     struct rfkill_event event;
-    struct timeval tv;
     struct pollfd p;
     ssize_t len;
     int fd, fd_name, n, type;
@@ -505,11 +590,13 @@ int main(int argc, char **argv)
     while (1) {
         static struct option opts[] = {
             { "config", required_argument, NULL, 'c' },
+            { "debug", no_argument, NULL, 'd' },
+            { "stderr", no_argument, NULL, 's' },
             { 0, 0, 0, 0 }
         };
         int c;
 
-        c = getopt_long(argc, argv, ":c:", opts, NULL);
+        c = getopt_long(argc, argv, ":c:ds", opts, NULL);
         if (c == -1)
             break;
 
@@ -517,19 +604,27 @@ int main(int argc, char **argv)
         case 'c':
             config_file = optarg;
             break;
+        case 'd':
+            log_debug = 1;
+            break;
+        case 's':
+            log_stderr = 1;
+            break;
         case ':':
-            error(1, 0, "Option '%s' missing argument", argv[optind-1]);
+            FATAL("Option '%s' missing argument", argv[optind-1]);
         default:
-            error(1, 0, "Unknown option '%s'", argv[optind-1]);
+            FATAL("Unknown option '%s'", argv[optind-1]);
         }
     }
+
+    INFO("Starting bluetooth_rfkill_event");
 
     /* this code is ispired by rfkill source code */
 
     fd = open("/dev/rfkill", O_RDONLY);
     if (fd < 0) {
-        perror("Can't open RFKILL control device");
-        return fd;
+        FATAL("Can't open RFKILL control device (%s/%d)",
+              strerror(errno), errno);
     }
 
     memset(&p, 0, sizeof(p));
@@ -539,7 +634,8 @@ int main(int argc, char **argv)
     while (1) {
         n = poll(&p, 1, -1);
         if (n < 0) {
-            perror("Failed to poll RFKILL control device");
+            ERROR("Failed to poll RFKILL control device (%s/%d)",
+                  strerror(errno), errno);
             break;
         }
 
@@ -548,12 +644,14 @@ int main(int argc, char **argv)
 
         len = read(fd, &event, sizeof(event));
         if (len < 0) {
-            perror("Reading of RFKILL events failed");
+            ERROR("Reading of RFKILL events failed (%s/%d)",
+                  strerror(errno), errno);
             break;
         }
 
         if (len != sizeof(event)) {
-            perror("Wrong size of RFKILL event");
+            ERROR("Wrong size of RFKILL event (%s/%d)",
+                  strerror(errno), errno);
             break;
         }
 
@@ -561,11 +659,9 @@ int main(int argc, char **argv)
         if (event.type != RFKILL_TYPE_BLUETOOTH)
             continue;
 
-        gettimeofday(&tv, NULL);
-        printf("%ld.%06u: idx %u type %u op %u soft %u hard %u\n",
-              (long) tv.tv_sec, (unsigned int) tv.tv_usec,
-              event.idx, event.type, event.op, event.soft, event.hard);
-        fflush(stdout);
+        DEBUG("rfkill event: idx %u type %s(%u) op %s(%u) soft %u hard %u",
+              event.idx, type2string(event.type), event.type,
+              op2string(event.op), event.op, event.soft, event.hard);
 
         /* try to read rfkill interface name only if event is not a remove one, in this case call free_hci */
         if (event.op != RFKILL_OP_DEL)
@@ -576,7 +672,8 @@ int main(int argc, char **argv)
             fd_name = open(sysname, O_RDONLY);
             if (fd_name < 0)
             {
-                perror("fail to open rfkill name");
+                ERROR("Failed to open rfkill name (%s/%d)",
+                     strerror(errno), errno);
                 continue;
             }
 
@@ -585,7 +682,8 @@ int main(int argc, char **argv)
             /* read name */
             if (read(fd_name, sysname, sizeof(sysname) - 1) < 0)
             {
-                perror("fail to read rfkill name");
+                ERROR("Failed to read rfkill name (%s/%d)",
+                      strerror(errno), errno);
                 close(fd_name);
                 continue;
             }
