@@ -33,10 +33,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/poll.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <limits.h>
+#include <err.h>
+#include <error.h>
 #include <glib.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -152,7 +155,7 @@ GKeyFile *load_config(const char *file)
 
     if (!g_key_file_load_from_file(keyfile, file, 0, &err)) {
         if (!g_error_matches(err, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-            error("Parsing %s failed: %s", file, err->message);
+            error(1, 0, "Parsing %s failed: %s", file, err->message);
         g_error_free(err);
         g_key_file_free(keyfile);
         return NULL;
@@ -448,8 +451,7 @@ void up_hci(int hci_idx)
    once hci bluetooth is registered back it will be blocked */
 void rfkill_bluetooth_unblock()
 {
-    int fd, sk, times;
-    int ret = -1;
+    int fd;
     struct rfkill_event event;
 
     fd = open("/dev/rfkill", O_RDWR | O_CLOEXEC);
@@ -477,8 +479,7 @@ int main(int argc, char **argv)
     struct pollfd p;
     ssize_t len;
     int fd, fd_name, n, type;
-    int ret, hci_dev_id;
-    char *script;
+    int hci_dev_id = -1;
     char sysname[PATH_MAX];
 
     /* this code is ispired by rfkill source code */

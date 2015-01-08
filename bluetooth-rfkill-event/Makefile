@@ -1,6 +1,6 @@
 OBJS = bluetooth_rfkill_event.o
 
-CFLAGS = -O2 -Wall
+CFLAGS = -O2 -Wall -Werror
 CFLAGS += `pkg-config --cflags bluez`
 CFLAGS += `pkg-config --cflags glib-2.0`
 
