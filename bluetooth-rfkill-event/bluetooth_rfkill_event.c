@@ -491,7 +491,7 @@ void free_hci()
 
     r = system(cmd);
     if (WIFEXITED(r) && !WEXITSTATUS(r)) {
-        snprintf(cmd, sizeof(cmd), "killall %s", hciattach);
+        snprintf(cmd, sizeof(cmd), "killall --wait %s", hciattach);
         r = system(cmd);
         INFO("killing %s %s", hciattach,
              (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
