@@ -40,6 +40,7 @@
 #include <limits.h>
 #include <err.h>
 #include <error.h>
+#include <getopt.h>
 #include <glib.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
@@ -58,6 +59,8 @@ enum {
 #define BD_ADD_FACTORY_FILE "/factory/bluetooth_address"
 char factory_bd_add[18];
 const char default_bd_addr[] = "00:43:34:b1:be:ef";
+
+#define DEFAULT_CONFIG_FILE "/etc/firmware/bcm43341.conf"
 
 /* attempt to set hci dev UP */
 #define MAX_RETRY 10
@@ -481,6 +484,30 @@ int main(int argc, char **argv)
     int fd, fd_name, n, type;
     int hci_dev_id = -1;
     char sysname[PATH_MAX];
+    char *config_file = DEFAULT_CONFIG_FILE;
+
+    opterr = 0;
+    while (1) {
+        static struct option opts[] = {
+            { "config", required_argument, NULL, 'c' },
+            { 0, 0, 0, 0 }
+        };
+        int c;
+
+        c = getopt_long(argc, argv, ":c:", opts, NULL);
+        if (c == -1)
+            break;
+
+        switch (c) {
+        case 'c':
+            config_file = optarg;
+            break;
+        case ':':
+            error(1, 0, "Option '%s' missing argument", argv[optind-1]);
+        default:
+            error(1, 0, "Unknown option '%s'", argv[optind-1]);
+        }
+    }
 
     /* this code is ispired by rfkill source code */
 
@@ -553,7 +580,7 @@ int main(int argc, char **argv)
             /* based on chip read its config file, if any, and define the hciattach utility used to dowload the patch */
             if (strncmp(BCM_RFKILL_NAME,sysname, sizeof(BCM_RFKILL_NAME)) == 0)
             {
-                read_config("/etc/firmware/bcm43341.conf");
+                read_config(config_file);
                 snprintf(hciattach, sizeof(hciattach), "brcm_patchram_plus");
                 type = BT_PWR;
             }
