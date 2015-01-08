@@ -475,12 +475,17 @@ void read_config(char* file)
     if ((cur < end) && (main_opts.tosleep)) {
         cur += snprintf(cur, end-cur," --tosleep %d", main_opts.tosleep);
     }
+    if ((cur < end) && log_debug) {
+        cur += snprintf(cur, end-cur," -d");
+    }
 }
 
 void free_hci()
 {
     char cmd[PATH_MAX];
     int r;
+
+    DEBUG("");
 
     snprintf(cmd, sizeof(cmd), "pidof %s", hciattach);
 
@@ -500,6 +505,8 @@ void attach_hci()
     char hci_execute[PATH_MAX];
     int r;
 
+    DEBUG("");
+
     snprintf(hci_execute, sizeof(hci_execute), "%s %s %s", hciattach, hciattach_options, main_opts.uart_dev);
 
     r = system(hci_execute);
@@ -514,6 +521,8 @@ void up_hci(int hci_idx)
 {
     int sk, i;
     struct hci_dev_info hci_info;
+
+    DEBUG("");
 
     sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
 
@@ -574,6 +583,8 @@ void rfkill_bluetooth_unblock()
     int fd;
     struct rfkill_event event;
 
+    DEBUG("");
+
     fd = open("/dev/rfkill", O_RDWR | O_CLOEXEC);
     if (fd < 0)
     {
@@ -601,6 +612,8 @@ static int rfkill_switch_add(struct rfkill_event *event)
     int fd_name = -1;
     int r = -1;
     int type;
+
+    DEBUG("");
 
     /* get the name to check the bt chip */
     snprintf(sysname, sizeof(sysname), "/sys/class/rfkill/rfkill%u/name",
