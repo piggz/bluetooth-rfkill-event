@@ -117,6 +117,8 @@ struct main_opts {
     gboolean    enable_lpm;
     /* register the hci device */
     gboolean    enable_hci;
+    /* raise hci on unblock */
+    gboolean    up_hci;
     /* set UART baud rate */
     gboolean    set_baud_rate;
     int         baud_rate;
@@ -141,6 +143,7 @@ static const char * const supported_options[] = {
     "fork",
     "lpm",
     "reg_hci",
+    "up_hci",
     "baud_rate",
     "fw_patch",
     "uart_dev",
@@ -240,6 +243,7 @@ void init_config()
     main_opts.enable_fork = TRUE;
     main_opts.enable_lpm = TRUE;
     main_opts.enable_hci = FALSE;
+    main_opts.up_hci = TRUE;
     main_opts.set_baud_rate = FALSE;
     main_opts.dl_patch = FALSE;
     main_opts.set_bd = FALSE;
@@ -334,6 +338,12 @@ void parse_config(GKeyFile *config)
         g_clear_error(&err);
     } else
         main_opts.enable_hci = boolean;
+
+    boolean = g_key_file_get_boolean(config, "General", "up_hci", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else
+        main_opts.up_hci = boolean;
 
     val = g_key_file_get_integer(config, "General", "baud_rate", &err);
     if (err) {
@@ -780,7 +790,8 @@ int main(int argc, char **argv)
                 else if (s->type == BT_HCI && hci_dev_registered)
                 {
                     /* wait unblock on hci bluetooth interface and force device UP */
-                    up_hci(s->hci.dev_id);
+		    if (main_opts.up_hci)
+			up_hci(s->hci.dev_id);
                 }
             }
             else if (s->type == BT_PWR && hci_dev_registered)
