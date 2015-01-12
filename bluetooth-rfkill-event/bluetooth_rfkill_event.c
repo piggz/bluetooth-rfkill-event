@@ -748,7 +748,7 @@ void up_hci(int hci_idx)
     int sk, i;
     struct hci_dev_info hci_info;
 
-    DEBUG("");
+    DEBUG("%d", hci_idx);
 
     sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
 
@@ -760,15 +760,16 @@ void up_hci(int hci_idx)
     }
 
     memset(&hci_info, 0, sizeof(hci_info));
-
     hci_info.dev_id = hci_idx;
 
     for (i = 0;  i < MAX_RETRY; i++)
     {
+	DEBUG("Checking %d/%d", i+1, MAX_RETRY);
+
         if (ioctl(sk, HCIGETDEVINFO, (void *) &hci_info) < 0)
         {
-            ERROR("Failed to get HCI device information (%s/%d)",
-                  strerror(errno), errno);
+            ERROR("Failed to get HCI device %d information (%s/%d)",
+                  hci_idx, strerror(errno), errno);
             /* sleep 100ms */
             usleep(100*1000);
             continue;
@@ -776,19 +777,36 @@ void up_hci(int hci_idx)
 
         if (hci_test_bit(HCI_RUNNING, &hci_info.flags) && !hci_test_bit(HCI_INIT, &hci_info.flags))
         {
+	    DEBUG("HCI device %d running and initialized", hci_idx);
+
             /* check if kernel has already set device UP... */
             if (!hci_test_bit(HCI_UP, &hci_info.flags))
             {
+		struct hci_dev_req dev_req;
+
+		DEBUG("HCI device %d not yet up", hci_idx);
+
+		dev_req.dev_id = hci_idx;
+		dev_req.dev_opt = HCI_LM_ACCEPT;
+		if (ioctl(sk, HCISETLINKMODE, (unsigned long) &dev_req) < 0) {
+		    ERROR("Failed to set hci device %d link mode", hci_idx);
+		}
+
                 if (ioctl(sk, HCIDEVUP, hci_idx) < 0)
                 {
                     /* ignore if device is already UP and ready */
                     if (errno == EALREADY)
                         break;
 
-                    ERROR("Failed to set hci device UP (%s/%d)",
-                          strerror(errno), errno);
+                    ERROR("Failed to set hci device %d UP (%s/%d)",
+                          hci_idx, strerror(errno), errno);
                 }
-            }
+
+		DEBUG("HCI device %d set up", hci_idx);
+
+            } else
+		DEBUG("HCI device %d already up", hci_idx);
+
             break;
         }
 
