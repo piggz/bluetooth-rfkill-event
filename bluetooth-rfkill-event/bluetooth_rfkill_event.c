@@ -109,6 +109,7 @@ char hciattach_options[PATH_MAX];
 char hci_uart_default_dev[PATH_MAX] = BCM_43341_UART_DEV;
 
 gboolean hci_dev_registered;
+char *bt_module = NULL;
 char *config_file = DEFAULT_CONFIG_FILE;
 GHashTable *switch_hash = NULL; /* hash index to metadata about the switch */
 
@@ -898,6 +899,7 @@ int main(int argc, char **argv)
     opterr = 0;
     while (1) {
         static struct option opts[] = {
+            { "btmodule", required_argument, NULL, 'b' },
             { "config", required_argument, NULL, 'c' },
             { "debug", no_argument, NULL, 'd' },
             { "stderr", no_argument, NULL, 's' },
@@ -905,11 +907,16 @@ int main(int argc, char **argv)
         };
         int c;
 
-        c = getopt_long(argc, argv, ":c:ds", opts, NULL);
+        c = getopt_long(argc, argv, ":b:c:ds", opts, NULL);
         if (c == -1)
             break;
 
         switch (c) {
+        case 'b':
+            /* Not in config file because config file isn't loaded
+               until BT rfkill switch is identified */
+            bt_module = optarg;
+            break;
         case 'c':
             config_file = optarg;
             break;
@@ -927,6 +934,31 @@ int main(int argc, char **argv)
     }
 
     INFO("Starting bluetooth_rfkill_event");
+
+    /* If Bluetooth kernel module is specified, try to unload and
+       reload it before starting up. */
+    if (bt_module) {
+        char buf[PATH_MAX];
+        int r;
+
+        INFO("Reloading Bluetooth module %s", bt_module);
+
+        snprintf(buf, sizeof(buf), "/sbin/modprobe -r %s", bt_module);
+        r = system_timeout(buf);
+        if (!WIFEXITED(r) || WEXITSTATUS(r)) {
+            /* May fail if module isn't there at the moment, that's fine */
+            INFO("Failed to unload Bluetooth module %s (ignoring)", bt_module);
+        } else {
+            INFO("Unloaded Bluetooth module %s", bt_module);
+        }
+
+        snprintf(buf, sizeof(buf), "/sbin/modprobe %s", bt_module);
+        r = system_timeout(buf);
+        if (!WIFEXITED(r) || WEXITSTATUS(r)) {
+            FATAL("Failed to load Bluetooth module %s", bt_module);
+        }
+        INFO("Loading Bluetooth module %s succeeded", bt_module);
+    }
 
     /* this code is ispired by rfkill source code */
 
