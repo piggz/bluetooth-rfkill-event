@@ -736,6 +736,9 @@ void attach_hci()
     INFO("executing %s %s", hci_execute,
          (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
 
+    if (!WIFEXITED(r) || WEXITSTATUS(r))
+        FATAL("Failed to execute %s, exiting", hci_execute);
+
     /* remember if hci device has been registered (in case conf file is changed) */
     hci_dev_registered = main_opts.enable_hci;
 }
@@ -838,20 +841,23 @@ static int rfkill_switch_add(struct rfkill_event *event)
 
     DEBUG("");
 
+    /* reading switch metadata could fail if switch is already removed
+       when we get here */
+
     /* get the name to check the bt chip */
     snprintf(sysname, sizeof(sysname), "/sys/class/rfkill/rfkill%u/name",
 	     event->idx);
 
     fd_name = open(sysname, O_RDONLY);
     if (fd_name < 0) {
-	ERROR("Failed to open rfkill name (%s/%d)", strerror(errno), errno);
+	WARN("Failed to open rfkill name (%s/%d)", strerror(errno), errno);
 	goto out;
     }
 
     /* read name */
     memset(sysname, 0, sizeof(sysname));
     if (read(fd_name, sysname, sizeof(sysname) - 1) < 0) {
-	ERROR("Failed to read rfkill name (%s/%d)", strerror(errno), errno);
+	WARN("Failed to read rfkill name (%s/%d)", strerror(errno), errno);
 	goto out;
     }
 
@@ -975,7 +981,7 @@ int main(int argc, char **argv)
     while (1) {
         n = poll(&p, 1, -1);
         if (n < 0) {
-            ERROR("Failed to poll RFKILL control device (%s/%d)",
+            FATAL("Failed to poll RFKILL control device (%s/%d)",
                   strerror(errno), errno);
             break;
         }
@@ -985,13 +991,13 @@ int main(int argc, char **argv)
 
         len = read(fd, &event, sizeof(event));
         if (len < 0) {
-            ERROR("Reading of RFKILL events failed (%s/%d)",
+            FATAL("Reading of RFKILL events failed (%s/%d)",
                   strerror(errno), errno);
             break;
         }
 
         if (len != sizeof(event)) {
-            ERROR("Wrong size of RFKILL event (%s/%d)",
+            FATAL("Wrong size of RFKILL event (%s/%d)",
                   strerror(errno), errno);
             break;
         }
@@ -1025,11 +1031,13 @@ int main(int argc, char **argv)
                 if (s->type == BT_PWR)
                 {
                     /* if unblock is for power interface: download patch and eventually register hci device */
+		    INFO("BT power driver unblocked");
                     free_hci();
                     attach_hci();
                     /* force to unblock also the bluetooth hci rfkill interface if hci device was registered */
                     if (hci_dev_registered)
                         rfkill_bluetooth_unblock();
+		    INFO("BT enabled");
                 }
                 else if (s->type == BT_HCI && hci_dev_registered)
                 {
@@ -1041,7 +1049,9 @@ int main(int argc, char **argv)
             else if (s->type == BT_PWR && hci_dev_registered)
             {
                 /* for a block event on power interface force unblock of hci device interface */
+		INFO("BT power driver blocked");
                 free_hci();
+		INFO("BT disabled");
             }
 
         break;
