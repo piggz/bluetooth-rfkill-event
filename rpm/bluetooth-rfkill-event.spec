@@ -29,5 +29,5 @@ rm -rf %{buildroot}
 # >> files
 %{_sbindir}/bluetooth_rfkill_event
 /%{_lib}/systemd/system/bluetooth-rfkill-event.service
-%config %{_sysconfdir}/firmware/*.conf
+%exclude %{_sysconfdir}/firmware/*.conf
 # << files

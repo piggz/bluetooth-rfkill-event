@@ -1,9 +1,10 @@
 [Unit]
-Description=Bluetooth rf kill event daemon
+Description=Bluetooth rfkill event daemon
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/bluetooth_rfkill_event
+EnvironmentFile=/etc/sysconfig/bluetooth-rfkill-event
+ExecStart=/usr/sbin/bluetooth_rfkill_event $DEBUG $BTMODULE $CONFIGFILE
 Restart=on-failure
 
 [Install]
