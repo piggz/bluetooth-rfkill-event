@@ -37,6 +37,8 @@
 #include <sys/poll.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <limits.h>
 #include <getopt.h>
 #include <syslog.h>
@@ -135,6 +137,8 @@ struct main_opts {
     char*       scopcm;
     /* Delay before patchram download (microseconds) */
     guint       tosleep;
+    /* Timeout for executing commands (seconds), 0 == unlimited */
+    guint       exec_timeout;
 };
 
 struct main_opts main_opts;
@@ -148,7 +152,8 @@ static const char * const supported_options[] = {
     "fw_patch",
     "uart_dev",
     "scopcm",
-    "tosleep"
+    "tosleep",
+    "exec_timeout"
 };
 
 static int log_debug = 0;
@@ -236,6 +241,205 @@ static const char *type2string(enum rfkill_type type)
     }
 }
 
+#define PIPE_READ 0
+#define PIPE_WRITE 1
+
+static int terminate(pid_t pid)
+{
+    int r = W_EXITCODE(EXIT_FAILURE, 0);
+
+    if (kill(pid, SIGKILL) < 0) {
+	WARN("Cannot kill pid %d: %s(%d)", pid, strerror(errno), errno);
+    } else {
+	DEBUG("Marking pid %d as killed.", pid);
+	r = W_EXITCODE(0, SIGKILL);
+    }
+
+    return r;
+}
+
+static int system_timeout(char *cmd)
+{
+    int pipes[3][2]  = {
+	{ -1, -1 }, { -1, -1 }, { -1, -1 }
+    };
+    int i, j;
+    pid_t child;
+    int r = W_EXITCODE(EXIT_FAILURE, 0);
+
+    DEBUG("command %s timeout %d", cmd, main_opts.exec_timeout);
+
+    if (pipe(pipes[0]) < 0 ||
+	pipe(pipes[1]) < 0 ||
+	pipe(pipes[2]) < 0) {
+	WARN("Can't create pipes for child process communication: %s(%d)",
+	     strerror(errno), errno);
+	goto out;
+    }
+
+    for (i = 0; i < 3; i++) {
+	for (j = 0; j < 2; j++) {
+	    int flags = fcntl(pipes[i][j], F_GETFL, 0);
+	    if (flags < 0 ||
+		fcntl(pipes[i][j], F_SETFL, flags | O_NONBLOCK) < 0) {
+		WARN("Can't set pipes non-blocking: %s(%d)",
+		     strerror(errno), errno);
+		goto out;
+	    }
+	}
+    }
+
+    child = fork();
+    if (child < 0) {
+	WARN("Can't create child process: %s(%d)", strerror(errno), errno);
+	goto out;
+
+    } else if (child == 0) {
+	char *argv[4] = {
+	    "/bin/sh",
+	    "-c",
+	    cmd,
+	    NULL
+	};
+
+	close(pipes[0][PIPE_WRITE]);
+	close(pipes[1][PIPE_READ]);
+	close(pipes[2][PIPE_READ]);
+
+	if (dup2(pipes[0][PIPE_READ], 0) < 0 ||
+	    dup2(pipes[1][PIPE_WRITE], 1) < 0 ||
+	    dup2(pipes[2][PIPE_WRITE], 2) < 0) {
+	    WARN("Can't set up stdio in child process: %s(%d)",
+		 strerror(errno), errno);
+	    exit(EXIT_FAILURE);
+	}
+
+	if (execv("/bin/sh", argv) < 0) {
+	    WARN("Can't execute command '%s': %s(%d)",
+		 cmd, strerror(errno), errno);
+	    exit(EXIT_FAILURE);
+	}
+
+	/* NOTREACHED -- execv won't return on success */
+
+    } else {
+	struct timeval stop;
+
+	DEBUG("Forked child process %d", child);
+
+	close(pipes[0][PIPE_READ]);
+	close(pipes[1][PIPE_WRITE]);
+	close(pipes[2][PIPE_WRITE]);
+	pipes[0][PIPE_READ] = pipes[1][PIPE_WRITE] = pipes[2][PIPE_WRITE] = -1;
+
+	if (main_opts.exec_timeout) {
+	    gettimeofday(&stop, NULL);
+	    stop.tv_sec += main_opts.exec_timeout;
+	}
+
+	while(1) {
+	    struct timeval now;
+	    struct timeval delay;
+	    fd_set readfds;
+	    char buf[PIPE_BUF];
+	    int n, status;
+	    int maxfd = -1;
+
+	    if (main_opts.exec_timeout) {
+		gettimeofday(&now, NULL);
+		if (now.tv_sec > stop.tv_sec ||
+		    (now.tv_sec == stop.tv_sec && now.tv_usec > stop.tv_usec)) {
+		    WARN("Command %s (pid %d) timeout exceeded, killing it.",
+			 cmd, child);
+		    r = terminate(child);
+		    goto out;
+		}
+	    }
+
+	    FD_ZERO(&readfds);
+	    if (pipes[1][PIPE_READ] >= 0) {
+		maxfd = MAX(maxfd, pipes[1][PIPE_READ]);
+		FD_SET(pipes[1][PIPE_READ], &readfds);
+	    }
+	    if (pipes[2][PIPE_READ] >= 0) {
+		maxfd = MAX(maxfd, pipes[2][PIPE_READ]);
+		FD_SET(pipes[2][PIPE_READ], &readfds);
+	    }
+
+	    if (main_opts.exec_timeout) {
+		unsigned long long delay_usec =
+		    1000000*stop.tv_sec + stop.tv_usec -
+		    1000000*now.tv_sec - now.tv_usec;
+		if (delay_usec > 1000000)
+		    delay_usec = 1000000;
+		delay.tv_sec = delay_usec/1000000;
+		delay.tv_usec = delay_usec%1000000;
+	    } else {
+		delay.tv_sec = 1;
+		delay.tv_usec = 0;
+	    }
+
+	    switch (select(maxfd + 1, &readfds, NULL, NULL, &delay)) {
+
+	    case -1:
+		WARN("Error while waiting for pid %d: %s(%d)",
+		     child, strerror(errno), errno);
+		r = terminate(child);
+		goto out;
+
+	    case 0:
+		break;
+
+	    default:
+		if (FD_ISSET(pipes[1][PIPE_READ], &readfds)) {
+		    n = read(pipes[1][PIPE_READ], buf, PIPE_BUF);
+		    if (n > 0)
+			DEBUG("pid %d: %.*s", child, n, buf);
+		    else if (n == 0) {
+			DEBUG("pid %d stdout end of file", child);
+			close(pipes[1][PIPE_READ]);
+			pipes[1][PIPE_READ] = -1;
+		    }
+		}
+
+		if (FD_ISSET(pipes[2][PIPE_READ], &readfds)) {
+		    n = read(pipes[2][PIPE_READ], buf, PIPE_BUF);
+		    if (n > 0)
+			DEBUG("pid %d: %.*s", child, n, buf);
+		    else if (n == 0) {
+			DEBUG("pid %d stderr end of file", child);
+			close(pipes[2][PIPE_READ]);
+			pipes[2][PIPE_READ] = -1;
+		    }
+		}
+	    }
+
+	    if (waitpid(child, &status, WNOHANG) == child) {
+		DEBUG("Child %d status changed.", child);
+
+		if (WIFEXITED(status)) {
+		    DEBUG("Child %d exited %ssuccessfully", child,
+			  WEXITSTATUS(status) ? "un" : "");
+		} else if (WIFSIGNALED(status)) {
+		    DEBUG("Child %d terminated with signal %d",
+			  child, WTERMSIG(status));
+		}
+
+		r = status;
+		goto out;
+	    }
+	}
+    }
+
+out:
+    for (i = 0; i < 3; i++)
+	for (j = 0; j < 2; j++)
+	    if (pipes[i][j] >= 0)
+		close(pipes[i][j]);
+
+    return r;
+}
+
 void init_config()
 {
     memset(&main_opts, 0, sizeof(main_opts));
@@ -249,6 +453,7 @@ void init_config()
     main_opts.set_bd = FALSE;
     main_opts.set_scopcm = FALSE;
     main_opts.tosleep = 0;
+    main_opts.exec_timeout = 0;
 }
 
 GKeyFile *load_config(const char *file)
@@ -387,6 +592,13 @@ void parse_config(GKeyFile *config)
         main_opts.tosleep = val;
     }
 
+    val = g_key_file_get_integer(config, "General", "exec_timeout", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        main_opts.exec_timeout = val;
+    }
+
 }
 
 gboolean check_bd_format(const char* bd_add)
@@ -499,10 +711,10 @@ void free_hci()
 
     snprintf(cmd, sizeof(cmd), "pidof %s", hciattach);
 
-    r = system(cmd);
+    r = system_timeout(cmd);
     if (WIFEXITED(r) && !WEXITSTATUS(r)) {
         snprintf(cmd, sizeof(cmd), "killall --wait %s", hciattach);
-        r = system(cmd);
+        r = system_timeout(cmd);
         INFO("killing %s %s", hciattach,
              (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
     } else {
@@ -519,7 +731,7 @@ void attach_hci()
 
     snprintf(hci_execute, sizeof(hci_execute), "%s %s %s", hciattach, hciattach_options, main_opts.uart_dev);
 
-    r = system(hci_execute);
+    r = system_timeout(hci_execute);
     INFO("executing %s %s", hci_execute,
          (WIFEXITED(r) && !WEXITSTATUS(r)) ? "succeeded" : "failed");
 
