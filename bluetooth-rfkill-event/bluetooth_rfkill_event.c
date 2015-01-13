@@ -133,6 +133,8 @@ struct main_opts {
     /* configure BD address */
     gboolean    set_bd;
     char*       bd_add;
+    /* File containing bdaddr */
+    char*       bdaddr_file;
     /* set SCO routing for audio interface */
     gboolean    set_scopcm;
     char*       scopcm;
@@ -154,7 +156,8 @@ static const char * const supported_options[] = {
     "uart_dev",
     "scopcm",
     "tosleep",
-    "exec_timeout"
+    "exec_timeout",
+    "bdaddr"
 };
 
 static int log_debug = 0;
@@ -600,6 +603,16 @@ void parse_config(GKeyFile *config)
         main_opts.exec_timeout = val;
     }
 
+    str = g_key_file_get_string(config, "General", "bdaddr", &err);
+    if (err) {
+        g_clear_error(&err);
+	g_free(main_opts.bdaddr_file);
+        main_opts.bdaddr_file = NULL;
+    } else {
+        g_free(main_opts.bdaddr_file);
+        main_opts.bdaddr_file = str;
+    }
+
 }
 
 gboolean check_bd_format(const char* bd_add)
@@ -633,11 +646,18 @@ void load_bd_add(void)
     FILE *fp;
     int ret;
 
-    fp = fopen(BD_ADD_FACTORY_FILE, "r");
+    fp = fopen(main_opts.bdaddr_file
+	       ? main_opts.bdaddr_file
+	       : BD_ADD_FACTORY_FILE, "r");
 
     /* if BD add file has not been provisioned use default one */
     if (fp == NULL)
     {
+	WARN("Can't open Bluetooth address file %s",
+	      main_opts.bdaddr_file
+	      ? main_opts.bdaddr_file
+	      : BD_ADD_FACTORY_FILE);
+
         memcpy(factory_bd_add, default_bd_addr, sizeof(factory_bd_add));
         main_opts.bd_add = factory_bd_add;
         main_opts.set_bd = TRUE;
