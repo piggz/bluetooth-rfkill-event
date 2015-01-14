@@ -1,0 +1,4 @@
+# Can be used to configure the following:
+# DEBUG -- debug options
+# BTMODULE -- name of bluetooth kernel module to load/unload, if any
+# CONFIGFILE -- name of configuration file to use
