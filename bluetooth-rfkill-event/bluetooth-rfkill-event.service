@@ -1,5 +1,6 @@
 [Unit]
 Description=Bluetooth rfkill event daemon
+Before=bluetooth.service
 
 [Service]
 Type=simple
@@ -8,4 +9,4 @@ ExecStart=/usr/sbin/bluetooth_rfkill_event $DEBUG $BTMODULE $CONFIGFILE
 Restart=on-failure
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=bluetooth.target
