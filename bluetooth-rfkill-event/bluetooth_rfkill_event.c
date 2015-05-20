@@ -60,7 +60,7 @@ enum rfkill_switch_type {
 #define BCM_43341_UART_DEV "/dev/ttyMFD0"
 #define BD_ADD_FACTORY_FILE "/factory/bluetooth_address"
 char factory_bd_add[18];
-const char default_bd_addr[] = "00:43:34:b1:be:ef";
+char default_bd_addr[18];
 
 #define DEFAULT_CONFIG_FILE "/etc/firmware/bcm43341.conf"
 
@@ -211,6 +211,49 @@ static void bt_log(int level, const char *format, ...)
             __FUNCTION__, __FILE__, __LINE__, ## args); \
         exit(EXIT_FAILURE);                             \
     } while (0)
+
+static void random_default_bdaddr(void)
+{
+	union {
+		unsigned char c[6];
+		unsigned int i[2];
+	} data;
+	int fd = -1;
+
+	fd = open("/dev/random", O_RDONLY);
+	if (fd < 0) {
+		WARN("Cannot open /dev/random: %s (%d)",
+			strerror(errno), errno);
+		goto failed;
+	}
+
+	if (read(fd, data.c, 6) != 6) {
+		WARN("Cannot read /dev/random: %s (%d)",
+			errno ? strerror(errno) : "no errno", errno);
+		goto failed;
+	}
+
+	goto out;
+
+failed:
+	/* Fallback */
+	srand(time(NULL));
+	data.i[0] = rand();
+	data.i[1] = rand();
+
+out:
+	if (fd >= 0)
+		close(fd);
+
+	/* Make sure we're not using reserved LAP, see Baseband spec */
+	if (data.c[3] == 0x9e && data.c[4] == 0x8b && data.c[5] < 0x40)
+		data.c[5] += 0x40;
+
+	snprintf(default_bd_addr, sizeof(default_bd_addr),
+			"%02x:%02x:%02x:%02x:%02x:%02x",
+			data.c[0], data.c[1], data.c[2],
+			data.c[3], data.c[4], data.c[5]);
+}
 
 static void switch_free(gpointer data)
 {
@@ -978,6 +1021,9 @@ int main(int argc, char **argv)
     }
 
     INFO("Starting bluetooth_rfkill_event");
+
+    random_default_bdaddr();
+    DEBUG("Default bdaddr: %s", default_bd_addr);
 
     /* If Bluetooth kernel module is specified, try to unload and
        reload it before starting up. */
