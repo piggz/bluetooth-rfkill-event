@@ -49,6 +49,25 @@
 #include <bluetooth/hci_lib.h>
 
 
+enum patcher_type {
+    PATCHER_BRCM_PATCHRAM_PLUS,
+    PATCHER_HCIATTACH,
+    PATCHER_COUNT
+};
+
+struct patcher_impl {
+    const char *name;
+    void (*generate_cmdline)();
+};
+
+static void brcm_patchram_plus_cmdline();
+static void hciattach_cmdline();
+
+static const struct patcher_impl patcher_impl[PATCHER_COUNT] = {
+    { "brcm_patchram_plus", brcm_patchram_plus_cmdline },
+    { "hciattach",          hciattach_cmdline }
+};
+
 enum rfkill_switch_type {
     BT_PWR,
     BT_HCI,
@@ -63,6 +82,8 @@ char factory_bd_add[18];
 char default_bd_addr[18];
 
 #define DEFAULT_CONFIG_FILE "/etc/firmware/bcm43341.conf"
+
+#define HCIATTACH_TYPE_ID_DEFAULT "bcm43xx"
 
 /* attempt to set hci dev UP */
 #define MAX_RETRY 10
@@ -114,6 +135,10 @@ char *config_file = DEFAULT_CONFIG_FILE;
 GHashTable *switch_hash = NULL; /* hash index to metadata about the switch */
 
 struct main_opts {
+    /* which patcher binary to use; default to brcm_patchram_plus */
+    int         patcher;
+    /* type or id of device */
+    char*       type_id;
     /* 'fork' will keep running in background the hciattach utility; N/A if enable_hci is FALSE */
     gboolean    enable_fork;
     /* send enable Low Power Mode to Broadcom bluetooth controller; needed if power driver implements it */
@@ -130,6 +155,8 @@ struct main_opts {
     char*       fw_patch;
     /* UART device used for bluetooth; platform dependant */
     char*       uart_dev;
+    /* Enable UART flow control */
+    gboolean    flow;
     /* configure BD address */
     gboolean    set_bd;
     char*       bd_add;
@@ -139,7 +166,8 @@ struct main_opts {
     gboolean    set_scopcm;
     char*       scopcm;
     /* Delay before patchram download (microseconds) */
-    guint       tosleep;
+    gboolean    set_tosleep;
+    char*       tosleep;
     /* Timeout for executing commands (seconds), 0 == unlimited */
     guint       exec_timeout;
 };
@@ -147,6 +175,8 @@ struct main_opts {
 struct main_opts main_opts;
 
 static const char * const supported_options[] = {
+    "patcher",
+    "type_id",
     "fork",
     "lpm",
     "reg_hci",
@@ -154,6 +184,7 @@ static const char * const supported_options[] = {
     "baud_rate",
     "fw_patch",
     "uart_dev",
+    "flow",
     "scopcm",
     "tosleep",
     "exec_timeout",
@@ -491,6 +522,8 @@ void init_config()
 {
     memset(&main_opts, 0, sizeof(main_opts));
 
+    main_opts.patcher = PATCHER_BRCM_PATCHRAM_PLUS;
+    main_opts.type_id = NULL;
     main_opts.enable_fork = TRUE;
     main_opts.enable_lpm = TRUE;
     main_opts.enable_hci = FALSE;
@@ -499,7 +532,8 @@ void init_config()
     main_opts.dl_patch = FALSE;
     main_opts.set_bd = FALSE;
     main_opts.set_scopcm = FALSE;
-    main_opts.tosleep = 0;
+    main_opts.set_tosleep = FALSE;
+    main_opts.tosleep = NULL;
     main_opts.exec_timeout = 0;
 }
 
@@ -573,6 +607,20 @@ void parse_config(GKeyFile *config)
 
     check_config(config);
 
+    str = g_key_file_get_string(config, "General", "patcher", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        unsigned i;
+        for (i = 0; i < PATCHER_COUNT; i++) {
+            if (!strcmp(str, patcher_impl[i].name)) {
+                main_opts.patcher = i;
+                break;
+            }
+        }
+        g_free(str);
+    }
+
     boolean = g_key_file_get_boolean(config, "General", "fork", &err);
     if (err) {
         g_clear_error(&err);
@@ -632,11 +680,13 @@ void parse_config(GKeyFile *config)
         main_opts.set_scopcm = TRUE;
     }
 
-    val = g_key_file_get_integer(config, "General", "tosleep", &err);
+    str = g_key_file_get_string(config, "General", "tosleep", &err);
     if (err) {
         g_clear_error(&err);
     } else {
-        main_opts.tosleep = val;
+        main_opts.set_tosleep = TRUE;
+        g_free(main_opts.tosleep);
+        main_opts.tosleep = str;
     }
 
     val = g_key_file_get_integer(config, "General", "exec_timeout", &err);
@@ -656,6 +706,20 @@ void parse_config(GKeyFile *config)
         main_opts.bdaddr_file = str;
     }
 
+    str = g_key_file_get_string(config, "General", "type_id", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        g_free(main_opts.type_id);
+        main_opts.type_id = str;
+    }
+
+    val = g_key_file_get_integer(config, "General", "flow", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        main_opts.flow = val;
+    }
 }
 
 gboolean check_bd_format(const char* bd_add)
@@ -721,17 +785,10 @@ void load_bd_add(void)
 
 }
 
-void read_config(char* file)
+static void brcm_patchram_plus_cmdline()
 {
-    GKeyFile *config;
     char *cur = hciattach_options;
     const char *end = hciattach_options + sizeof(hciattach_options);
-
-    /* set first default values and then load configured ones */
-    init_config();
-    config = load_config(file);
-    parse_config(config);
-    load_bd_add();
 
     /* set always configured options: use same configured baud-rate also for download, and ignore first 2 bytes (needed by bcm43341 and more recent brcm bt chip) */
     cur += snprintf(cur, end-cur, "%s", "--use_baudrate_for_download --no2bytes");
@@ -759,11 +816,53 @@ void read_config(char* file)
         cur += snprintf(cur, end-cur," --scopcm %s", main_opts.scopcm);
     }
     if ((cur < end) && (main_opts.tosleep)) {
-        cur += snprintf(cur, end-cur," --tosleep %d", main_opts.tosleep);
+        cur += snprintf(cur, end-cur," --tosleep %s", main_opts.tosleep);
     }
     if ((cur < end) && log_debug) {
         cur += snprintf(cur, end-cur," -d");
     }
+    if ((cur < end)) {
+        cur += snprintf(cur, end-cur, " %s", main_opts.uart_dev);
+    }
+}
+
+static const char *tosleep_value()
+{
+    if (!main_opts.tosleep)
+        return "";
+    else if (!strcmp(main_opts.tosleep, "0") || !strcmp(main_opts.tosleep, "false"))
+        return "nosleep";
+    else
+        return "sleep";
+}
+
+static void hciattach_cmdline()
+{
+    char *cur = hciattach_options;
+    const char *end = hciattach_options + sizeof(hciattach_options);
+
+    cur += snprintf(cur, end-cur, " %s", main_opts.uart_dev);
+    cur += snprintf(cur, end-cur, " %s", main_opts.type_id ? main_opts.type_id : HCIATTACH_TYPE_ID_DEFAULT);
+    cur += snprintf(cur, end-cur, " %d", main_opts.baud_rate);
+    cur += snprintf(cur, end-cur, " %s", main_opts.flow ? "flow" : "noflow");
+    if (main_opts.set_tosleep)
+        cur += snprintf(cur, end-cur, " %s", tosleep_value());
+    cur += snprintf(cur, end-cur," %s", main_opts.bd_add);
+}
+
+void read_config(char* file)
+{
+    GKeyFile *config;
+
+    /* set first default values and then load configured ones */
+    init_config();
+    config = load_config(file);
+    parse_config(config);
+    load_bd_add();
+
+    patcher_impl[main_opts.patcher].generate_cmdline();
+    if (config)
+        g_key_file_unref(config);
 }
 
 void free_hci()
@@ -793,7 +892,7 @@ void attach_hci()
 
     DEBUG("");
 
-    snprintf(hci_execute, sizeof(hci_execute), "%s %s %s", hciattach, hciattach_options, main_opts.uart_dev);
+    snprintf(hci_execute, sizeof(hci_execute), "%s %s", hciattach, hciattach_options);
 
     r = system_timeout(hci_execute);
     INFO("executing %s %s", hci_execute,
@@ -945,7 +1044,7 @@ static int rfkill_switch_add(struct rfkill_event *event)
     /* based on chip read its config file, if any, and define the hciattach utility used to dowload the patch */
     if (!strncmp(BCM_RFKILL_NAME, sysname, sizeof(BCM_RFKILL_NAME))) {
 	read_config(config_file);
-	snprintf(hciattach, sizeof(hciattach), "brcm_patchram_plus");
+	snprintf(hciattach, sizeof(hciattach), patcher_impl[main_opts.patcher].name);
 	type = BT_PWR;
     } else if (g_str_has_prefix(sysname, "hci")) {
 	type = BT_HCI;
