@@ -170,6 +170,10 @@ struct main_opts {
     char*       tosleep;
     /* Timeout for executing commands (seconds), 0 == unlimited */
     guint       exec_timeout;
+    /* Don't do flush with hciattach */
+    gboolean    no_flush;
+    /* Enable lpm with hciattach */
+    gboolean    use_lpm;
 };
 
 struct main_opts main_opts;
@@ -188,7 +192,9 @@ static const char * const supported_options[] = {
     "scopcm",
     "tosleep",
     "exec_timeout",
-    "bdaddr"
+    "bdaddr",
+    "no_flush",
+    "use_lpm"
 };
 
 static int log_debug = 0;
@@ -535,6 +541,8 @@ void init_config()
     main_opts.set_tosleep = FALSE;
     main_opts.tosleep = NULL;
     main_opts.exec_timeout = 0;
+    main_opts.no_flush = FALSE;
+    main_opts.use_lpm = FALSE;
 }
 
 GKeyFile *load_config(const char *file)
@@ -720,6 +728,20 @@ void parse_config(GKeyFile *config)
     } else {
         main_opts.flow = val;
     }
+
+    boolean = g_key_file_get_boolean(config, "General", "no_flush", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        main_opts.no_flush = boolean;
+    }
+
+    boolean = g_key_file_get_boolean(config, "General", "use_lpm", &err);
+    if (err) {
+        g_clear_error(&err);
+    } else {
+        main_opts.use_lpm = boolean;
+    }
 }
 
 gboolean check_bd_format(const char* bd_add)
@@ -841,6 +863,8 @@ static void hciattach_cmdline()
     char *cur = hciattach_options;
     const char *end = hciattach_options + sizeof(hciattach_options);
 
+    if (main_opts.no_flush) cur += snprintf(cur, end-cur, " -d");
+    if (main_opts.use_lpm)  cur += snprintf(cur, end-cur, " -m");
     cur += snprintf(cur, end-cur, " %s", main_opts.uart_dev);
     cur += snprintf(cur, end-cur, " %s", main_opts.type_id ? main_opts.type_id : HCIATTACH_TYPE_ID_DEFAULT);
     cur += snprintf(cur, end-cur, " %d", main_opts.baud_rate);
